@@ -4,6 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import machineCodingAssesment.dto.request.CreateOrderRequest;
 import machineCodingAssesment.dto.response.OrderResponse;
 import machineCodingAssesment.exception.BusinessRuleException;
+import machineCodingAssesment.exception.CapacityExceededException;
 import machineCodingAssesment.exception.ResourceNotFoundException;
 import machineCodingAssesment.model.Driver;
 import machineCodingAssesment.model.DriverStatus;
@@ -14,12 +15,15 @@ import machineCodingAssesment.repository.DriverRepository;
 import machineCodingAssesment.repository.ItemRepository;
 import machineCodingAssesment.repository.OrderRepository;
 import machineCodingAssesment.service.OrderService;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
+import java.util.Comparator;
 import java.util.Deque;
 import java.util.LinkedList;
 import java.util.List;
@@ -29,15 +33,6 @@ import java.util.stream.Collectors;
 
 /**
  * Core orchestrator: order lifecycle + auto-assignment to idle drivers.
- *
- * Concurrency posture (V1):
- *  - A real second thread exists from day one (the timeout scheduler), so all
- *    state transitions + the assignment critical section are serialized through
- *    a single ReentrantLock for correctness. This directly satisfies the Locking
- *    Note (one driver -> one order; a cancelled/already-picked order cannot be
- *    picked by a concurrent request).
- *  - V3 will replace this coarse lock with granular / read-write locking and
- *    swap the HashMap stores for ConcurrentHashMap.
  */
 @Slf4j
 @Service
@@ -52,8 +47,14 @@ public class OrderServiceImpl implements OrderService {
     private final ItemRepository itemRepository;
     private final TaskScheduler taskScheduler;
 
+    // Max orders allowed to wait for a driver. Beyond this we shed load (503)
+    // rather than let the queue grow unbounded and risk OOM. Externalized to
+    // config so ops can tune it (default 1000).
+    private final int maxPendingOrders;
+
     // FIFO queue of order ids waiting for a driver. Ongoing orders may exceed
-    // driver count (rule 5), so this can grow beyond the number of drivers.
+    // driver count (rule 5), so this can grow beyond the number of drivers
+    // (up to maxPendingOrders).
     private final Deque<String> pendingQueue = new LinkedList<>();
 
     // Coarse lock guarding all state transitions + the pending queue.
@@ -63,15 +64,20 @@ public class OrderServiceImpl implements OrderService {
                             DriverRepository driverRepository,
                             CustomerRepository customerRepository,
                             ItemRepository itemRepository,
-                            TaskScheduler taskScheduler) {
+                            TaskScheduler taskScheduler,
+                            @Value("${app.orders.max-pending:1000}") int maxPendingOrders) {
         this.orderRepository = orderRepository;
         this.driverRepository = driverRepository;
         this.customerRepository = customerRepository;
         this.itemRepository = itemRepository;
         this.taskScheduler = taskScheduler;
+        this.maxPendingOrders = maxPendingOrders;
     }
 
+    // @Transactional documents write intent and would give atomicity on a JPA-backed
+    // store. On the in-memory HashMap it is a no-op -- correctness here comes from the lock.
     @Override
+    @Transactional
     public OrderResponse placeOrder(CreateOrderRequest request) {
         validateReferences(request);
 
@@ -88,6 +94,17 @@ public class OrderServiceImpl implements OrderService {
 
         lock.lock();
         try {
+            // Load-shedding (backpressure): if the queue is already full AND no driver
+            // can take this order right now, reject with 503 instead of growing
+            // unbounded. If a driver is idle the order is served immediately and never
+            // waits, so it is always accepted.
+            if (pendingQueue.size() >= maxPendingOrders
+                    && driverRepository.findByStatus(DriverStatus.AVAILABLE).isEmpty()) {
+                log.warn("Rejecting order: pending queue full at capacity {}", maxPendingOrders);
+                throw new CapacityExceededException(
+                        "Pending order queue is full (capacity " + maxPendingOrders + "); please retry later");
+            }
+
             orderRepository.save(order);
             pendingQueue.addLast(order.getId());
             log.info("Order placed: id={}, item={}, status=PENDING", order.getId(), order.getItemId());
@@ -106,6 +123,7 @@ public class OrderServiceImpl implements OrderService {
     }
 
     @Override
+    @Transactional
     public OrderResponse cancelOrder(String orderId) {
         lock.lock();
         try {
@@ -140,6 +158,7 @@ public class OrderServiceImpl implements OrderService {
     }
 
     @Override
+    @Transactional
     public OrderResponse pickupOrder(String orderId, String driverId) {
         lock.lock();
         try {
@@ -172,6 +191,7 @@ public class OrderServiceImpl implements OrderService {
     }
 
     @Override
+    @Transactional
     public OrderResponse deliverOrder(String orderId, String driverId) {
         lock.lock();
         try {
@@ -203,6 +223,46 @@ public class OrderServiceImpl implements OrderService {
         }
     }
 
+    // Bonus: rate the driver after delivery (1-5). Only a DELIVERED, not-yet-rated
+    // order can be rated; the score updates the driver's running average.
+    @Override
+    @Transactional
+    public OrderResponse rateDriver(String orderId, int rating) {
+        lock.lock();
+        try {
+            Order order = findOrderOrThrow(orderId);
+            if (order.getStatus() != OrderStatus.DELIVERED) {
+                throw new BusinessRuleException(
+                        "Order " + orderId + " can only be rated after delivery (current: " + order.getStatus() + ")");
+            }
+            if (order.getRating() != null) {
+                throw new BusinessRuleException("Order " + orderId + " has already been rated");
+            }
+
+            Driver driver = driverRepository.findById(order.getAssignedDriverId())
+                    .orElseThrow(() -> new ResourceNotFoundException(
+                            "Driver not found with id: " + order.getAssignedDriverId()));
+
+            // Incremental running average so we never re-scan past ratings.
+            int newCount = driver.getRatingCount() + 1;
+            double newAvg = (driver.getRating() * driver.getRatingCount() + rating) / newCount;
+            driver.setRating(Math.round(newAvg * 100.0) / 100.0);   // keep 2 decimals
+            driver.setRatingCount(newCount);
+            driver.setUpdatedAt(LocalDateTime.now());
+            driverRepository.save(driver);
+
+            order.setRating(rating);
+            order.setUpdatedAt(LocalDateTime.now());
+            orderRepository.save(order);
+
+            log.info("Driver rated: order={}, driver={}, rating={}, newAvg={}",
+                    orderId, driver.getId(), rating, driver.getRating());
+            return toResponse(order);
+        } finally {
+            lock.unlock();
+        }
+    }
+
     @Override
     public OrderResponse getById(String orderId) {
         return toResponse(findOrderOrThrow(orderId));
@@ -222,9 +282,6 @@ public class OrderServiceImpl implements OrderService {
                 .collect(Collectors.toList());
     }
 
-    // ---------------------------------------------------------------------
-    // Internal assignment + lifecycle helpers (all called under `lock`)
-    // ---------------------------------------------------------------------
 
     /**
      * Drains the pending queue against currently idle drivers (rule 5).
@@ -232,7 +289,7 @@ public class OrderServiceImpl implements OrderService {
      */
     private void assignPendingOrders() {
         while (!pendingQueue.isEmpty()) {
-            String orderId = pendingQueue.peekFirst();
+            String orderId = pendingQueue. peekFirst();
             Order order = orderRepository.findById(orderId).orElse(null);
 
             // Drop stale entries (e.g. an order cancelled while queued).
@@ -254,11 +311,13 @@ public class OrderServiceImpl implements OrderService {
     }
 
     /**
-     * V1: first idle driver. V2 (bonus) will prefer the highest-rated driver.
+     * Bonus: prefer the highest-rated idle driver during assignment.
+     * Returns null when no driver is available.
      */
     private Driver pickAvailableDriver() {
-        List<Driver> available = driverRepository.findByStatus(DriverStatus.AVAILABLE);
-        return available.isEmpty() ? null : available.get(0);
+        return driverRepository.findByStatus(DriverStatus.AVAILABLE).stream()
+                .max(Comparator.comparingDouble(Driver::getRating))
+                .orElse(null);
     }
 
     private void assign(Order order, Driver driver) {
@@ -351,6 +410,7 @@ public class OrderServiceImpl implements OrderService {
                 .itemId(o.getItemId())
                 .status(o.getStatus())
                 .assignedDriverId(o.getAssignedDriverId())
+                .rating(o.getRating())
                 .createdAt(o.getCreatedAt())
                 .assignedAt(o.getAssignedAt())
                 .pickedUpAt(o.getPickedUpAt())

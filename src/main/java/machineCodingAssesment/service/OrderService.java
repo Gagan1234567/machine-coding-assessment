@@ -11,6 +11,7 @@ public interface OrderService {
     OrderResponse cancelOrder(String orderId);
     OrderResponse pickupOrder(String orderId, String driverId);
     OrderResponse deliverOrder(String orderId, String driverId);
+    OrderResponse rateDriver(String orderId, int rating);
     OrderResponse getById(String orderId);
     List<OrderResponse> getAll();
     List<OrderResponse> getByStatus(OrderStatus status);

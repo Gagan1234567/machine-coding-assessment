@@ -15,6 +15,7 @@ import java.time.LocalDateTime;
 public class DriverResponse {
     private String id;
     private String name;
+    private String phone;
     private DriverStatus status;
     private double rating;
     private int ratingCount;

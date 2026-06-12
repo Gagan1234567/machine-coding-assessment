@@ -14,6 +14,7 @@ import java.time.LocalDateTime;
 public class Driver {
     private String id;            // server-generated UUID
     private String name;
+    private String phone;         // optional contact number
     private DriverStatus status;
 
     // Bonus (wired in a later version): average rating + count for incremental averaging.

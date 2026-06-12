@@ -29,6 +29,7 @@ public class DriverServiceImpl implements DriverService {
         Driver driver = Driver.builder()
                 .id(UUID.randomUUID().toString())
                 .name(request.getName() == null ? null : request.getName().trim())
+                .phone(request.getPhone() == null ? null : request.getPhone().trim())
                 .status(DriverStatus.AVAILABLE)   // new drivers start idle and assignable
                 .rating(0.0)
                 .ratingCount(0)
@@ -66,6 +67,7 @@ public class DriverServiceImpl implements DriverService {
         return DriverResponse.builder()
                 .id(d.getId())
                 .name(d.getName())
+                .phone(d.getPhone())
                 .status(d.getStatus())
                 .rating(d.getRating())
                 .ratingCount(d.getRatingCount())

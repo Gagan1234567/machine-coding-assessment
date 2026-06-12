@@ -19,6 +19,7 @@ public class OrderResponse {
     private String itemId;
     private OrderStatus status;
     private String assignedDriverId;
+    private Integer rating;
     private LocalDateTime createdAt;
     private LocalDateTime assignedAt;
     private LocalDateTime pickedUpAt;

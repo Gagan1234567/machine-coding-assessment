@@ -1,5 +1,7 @@
 package machineCodingAssesment.controller;
 
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import machineCodingAssesment.dto.request.CreateCustomerRequest;
 import machineCodingAssesment.dto.response.ApiResponse;
@@ -14,12 +16,13 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/customers")
 @RequiredArgsConstructor
+@Tag(name = "Customers", description = "Onboard and view customers")
 public class CustomerController {
 
     private final CustomerService customerService;
 
     @PostMapping
-    public ResponseEntity<ApiResponse<CustomerResponse>> onboard(@RequestBody CreateCustomerRequest request) {
+    public ResponseEntity<ApiResponse<CustomerResponse>> onboard(@Valid @RequestBody CreateCustomerRequest request) {
         CustomerResponse created = customerService.onboard(request);
         return ResponseEntity.status(HttpStatus.CREATED)
                 .body(ApiResponse.success("Customer onboarded", created));

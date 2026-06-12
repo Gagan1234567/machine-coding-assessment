@@ -1,5 +1,7 @@
 package machineCodingAssesment.controller;
 
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import machineCodingAssesment.dto.request.CreateDriverRequest;
 import machineCodingAssesment.dto.response.ApiResponse;
@@ -15,12 +17,13 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/drivers")
 @RequiredArgsConstructor
+@Tag(name = "Drivers", description = "Onboard drivers and view their status")
 public class DriverController {
 
     private final DriverService driverService;
 
     @PostMapping
-    public ResponseEntity<ApiResponse<DriverResponse>> onboard(@RequestBody CreateDriverRequest request) {
+    public ResponseEntity<ApiResponse<DriverResponse>> onboard(@Valid @RequestBody CreateDriverRequest request) {
         DriverResponse created = driverService.onboard(request);
         return ResponseEntity.status(HttpStatus.CREATED)
                 .body(ApiResponse.success("Driver onboarded", created));

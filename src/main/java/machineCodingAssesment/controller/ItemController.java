@@ -1,5 +1,6 @@
 package machineCodingAssesment.controller;
 
+import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.RequiredArgsConstructor;
 import machineCodingAssesment.dto.response.ApiResponse;
 import machineCodingAssesment.dto.response.ItemResponse;
@@ -15,6 +16,7 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/items")
 @RequiredArgsConstructor
+@Tag(name = "Items", description = "Preconfigured, fixed item catalog")
 public class ItemController {
 
     private final ItemService itemService;

@@ -19,6 +19,7 @@ public class Order {
 
     private OrderStatus status;
     private String assignedDriverId;    // null until assigned
+    private Integer rating;             // bonus: 1-5 rating given after delivery, null until rated
 
     private LocalDateTime createdAt;
     private LocalDateTime assignedAt;
